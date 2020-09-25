@@ -1,0 +1,235 @@
+---
+title: "search_terms"
+author: "E. Bendall"
+date: "14/09/2020"
+output: word_document
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=8, fig.height=6)
+
+
+library(tidyverse)
+library(ggplot2)
+library(brms)
+library(rstan)
+library(here)
+library(cli)
+library(devtools)
+library(revtools)
+library(dmetar)
+library(tidybayes)
+library(readxl)
+library(metaverse)
+#devtools::install_github("elizagrames/litsearchr")
+#devtools::install_github("MathiasHarrer/dmetar")
+#remotes::install_github("rmetaverse/metaverse")
+
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+```
+
+First we will use the litsearchr package to build the boolean search string to be used to search databases.
+
+
+The first step involves using 'naive' search terms that are used to find a broad selection of matches in a large database, e.g. Web of Science
+
+```{r}
+## proposed naive search string: (("post-fire"  OR fire*  OR "post fire" OR burn*  AND ((manag*  OR strategi*  OR restor*  OR action*  OR practice*  OR salvage) AND (fauna  OR animal*  OR wildlife) OR (flora OR plant OR vegetation OR tree OR forest OR woodland))))
+
+## a problem is bib list download limits, must find way to bulk download lists or reduce number of matches.... for this example the first 2000 records were downloaded out of 150 000. The 150 000 matches were filtered to 'relevant' word matches. Should be enough to get apprpriate number of keywords
+
+search_directory <- here("naive_results")
+
+naiveimport <- litsearchr::import_results(directory = search_directory, verbose = TRUE)
+
+# remove duplicates
+naiveresults <- litsearchr::remove_duplicates(naiveimport, field = "title", method = "string_osa")
+
+```
+
+```{r}
+## extract keywords from titles and abstracts
+rakedkeywords <-
+  litsearchr::extract_terms(
+    text = paste(naiveresults$title, naiveresults$abstract),
+    method = "fakerake",
+    min_freq = 2,
+    ngrams = TRUE,
+    min_n = 2,
+    language = "English"
+  )
+```
+
+```{r}
+## build co-occurence network from keyword list
+
+naivedfm <-
+  litsearchr::create_dfm(
+    elements = paste(naiveresults$title, naiveresults$abstract),
+    features = rakedkeywords
+  )
+
+naivegraph <-
+  litsearchr::create_network(
+    search_dfm = as.matrix(naivedfm),
+    min_studies = 2,
+    min_occ = 2
+  )
+```
+
+```{r}
+## identify keywords
+
+cutoff <-
+  litsearchr::find_cutoff(
+    naivegraph,
+    method = "cumulative",
+    percent = .60, # This parameter can be tweaked, but increasing it to the suggested .80 results in too many keywords to manually categorise in the next step
+    imp_method = "strength"
+  )
+
+reducedgraph <-
+  litsearchr::reduce_graph(naivegraph, cutoff_strength = cutoff[1])
+
+searchterms <- litsearchr::get_keywords(reducedgraph)
+
+write.csv(searchterms, "./search_terms_240920.csv")
+## view first 20 keywords
+head(searchterms, 20)
+```
+
+```{r}
+
+# manually group terms and remove irrelevant terms in the csv
+
+grouped_terms <- read.csv("./search_terms_140920_grouped.csv")
+
+# extract the terms from the csv
+
+fire_terms <- grouped_terms$term[grep("b", grouped_terms$group)]
+management_terms <- grouped_terms$term[grep("m", grouped_terms$group)]
+fauna_terms <- grouped_terms$term[grep("f", grouped_terms$group)]
+
+### add any other terms manually into the list at this step
+
+# then merge them into a list, using the code below as an example
+mysearchterms <- list(fire_terms, management_terms, fauna_terms)
+
+
+```
+
+```{r}
+# Create search string
+
+my_search <-
+  litsearchr::write_search(
+    groupdata = mysearchterms,
+    languages = "English",
+    stemming = TRUE,
+    closure = "full",
+    exactphrase = TRUE,
+    writesearch = FALSE,
+    verbose = TRUE
+  )
+
+# if copying straight from the console, remove all "\"
+
+my_search
+```
+
+The above search returns 1132 titles in Web of Science and 1309 in Scopus.
+
+This is vastly reduced from previous iterations that used fewer search terms.
+
+
+
+The following steps to be completed when we have a reference set of articles
+
+Here we create a vector of reference titles to cross-check with our full results
+
+```{r}#
+
+## need a list of key titles here to validate the search string across databases
+gold_standard <-
+  c(
+    "title1",
+    "title2"
+  )
+
+title_search <- litsearchr::write_title_search(titles=gold_standard)
+```
+
+We then read in our full search results and compare them to our gold standard to determine which gold standard articles we retrieved. 
+
+```{r}#
+results_directory <- system.file("extdata/", package="synthesisr")
+
+retrieved_articles <-
+  litsearchr::import_results(directory = results_directory, verbose = TRUE)
+
+retrieved_articles <- litsearchr::remove_duplicates(retrieved_articles, field="title", method="string_osa")
+
+articles_found <- litsearchr::check_recall(true_hits = gold_standard,
+                                           retrieved = retrieved_articles$title)
+
+articles_found
+
+```
+
+The check indicates that all three of our gold standard articles were included in our search results, so we would go ahead with our final search and use it for our systematic review.

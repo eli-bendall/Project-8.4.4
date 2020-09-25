@@ -1,0 +1,184 @@
+---
+title: "screening_150920"
+author: "E. Bendall"
+date: "15/09/2020"
+output: html_document
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=8, fig.height=6)
+
+
+library(tidyverse)
+library(ggplot2)
+library(brms)
+library(rstan)
+library(here)
+library(cli)
+library(devtools)
+library(revtools)
+library(dmetar)
+library(tidybayes)
+library(readxl)
+library(openxlsx)
+#devtools::install_github("MathiasHarrer/dmetar")
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+# Set to TRUE to force models to be refitted
+REFIT_MODELS <- FALSE
+
+
+# Create a folder for fitted models if one does not already exist
+FittedModelsPath <- here("fitted_models")
+if (!dir.exists(FittedModelsPath)) {
+  dir.create(FittedModelsPath)
+}
+
+
+# Load brms if it is installed (requires Stan software and the rstan package).
+# If not installed, HAS_BRMS will be set to FALSE.
+HAS_BRMS <- suppressWarnings(
+  require("brms", quietly = TRUE)
+)
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+```
+
+```{r}
+## load in files
+
+data.bib <- read_bibliography(c("savedrecs (22).bib", "savedrecs (23).bib", "savedrecs (24).bib", "scopus.bib"))
+
+
+# merge files if different format
+
+#data <- merge_columns(data.bib, data.ris)
+```
+
+
+```{r}
+# locate duplicates R method
+matches <- revtools::find_duplicates(data.bib, match_variable = "title",
+                                               match_function = "fuzzdist",
+                                               to_lower = TRUE)
+
+# remove duplicates
+data_unique <- extract_unique_references(data.bib, matches)
+```
+
+```{r}#
+# screen duplicate
+result <- screen_duplicates(data.bib)
+
+```
+The screening identified 876 title matches, which were removed
+
+```{r}
+## ## screen titles manually
+
+## NOTE: when exiting the app, the result is saved with the same number of rows as the original. A new column is added with "excluded' tag
+result4 <- screen_abstracts(result3)
+
+save(result4, file = "result4.Rdata")
+
+## The title/abstract screening of 1678 articles took 3 work days
+```
+
+```{r}
+## there were many duplicates during the screening process, suggesting that the parameters initially used to locate duplicates were too weak. Here we manually screen for duplicates - NOTE: check each entry in the app for 'excluded/selected' to make sure you dont accidently removed any articles. Alternatively, perform this step after filtering to 'selected' articles
+
+
+# screen duplicates
+result5 <- screen_duplicates(result4)
+
+```
+
+
+```{r}
+### visualise accepted articles
+
+accepted_articles <- result5 %>%
+  filter(screened_abstracts == "selected")
+  
+screen_topics(accepted_articles)
+
+write.xlsx(accepted_articles, 'accepted_articles_trial.xlsx')
+
+
+```
+
